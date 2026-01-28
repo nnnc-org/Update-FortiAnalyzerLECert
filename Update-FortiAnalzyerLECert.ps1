@@ -2,12 +2,12 @@
 .SYNOPSIS
 This is a simple Powershell Core script to update FortiAnalyzer SSL certificate with a LetsEncrypt cert
 .DESCRIPTION
-This script uses the Posh-Acme module to RENEW a LetsEncrypt certificate, and then adds it to a Fortigate over SSH. This is designed to be ran consistently, and will not update the cert if Posh-Acme hasn't been setup previously.
+This script uses the Posh-Acme module to RENEW a LetsEncrypt certificate, and then adds it to a FortiAnalyzer over HTTPS. This is designed to be ran consistently, and will not update the cert if Posh-Acme hasn't been setup previously.
 .EXAMPLE
 ./Update-FortiAnalyzerLECert.ps1 -FortiAnalyzer 10.0.0.1 -Credential (new-credential admin admin) -MainDomain fa.example.com
 .NOTES
 This requires Posh-Acme to be preconfigured. The easiest way to do so is with the following command:
-    New-PACertificate -Domain fg.example.com,fgt.example.com,vpn.example.com -AcceptTOS -Contact me@example.com -DnsPlugin Cloudflare -PluginArgs @{CFAuthEmail="me@example.com";CFAuthKey='xxx'}
+    New-PACertificate -Domain fa.example.com,faz.example.com,fortianalyzer.example.com -AcceptTOS -Contact me@example.com -DnsPlugin Cloudflare -PluginArgs @{CFToken='xxxx'}
 .LINK
 Adapted from: https://github.com/SoarinFerret/Posh-FGT-LE
 #>
@@ -51,7 +51,6 @@ function Connect-FortiAnalyzer {
         id = $guid
     } | ConvertTo-Json -Depth 4
     try{
-        Update-Logs -Message "Authenticating to 'https://$FortiAnalyzer/jsonrpc' with username: $($Credential.UserName)"
         #splat arguments
         $splat = @{
             Uri = "https://$FortiAnalyzer/jsonrpc";
@@ -62,13 +61,10 @@ function Connect-FortiAnalyzer {
         if($PSEdition -eq "Core"){$splat.Add("SkipCertificateCheck",$true)}
 
         $authRequest = Invoke-RestMethod @splat
-        Update-Logs -Message "Login Result: $($authRequest.result.status)"
     }catch{
-        Update-Logs -Message "Failed to authenticate to FortiAnalyzer with error: `n`t$_" 
+        #Write-Output "Failed to authenticate to FortiAnalyzer with error: `n`t$_" 
         throw "Failed to authenticate to FortiAnalyzer with error: `n`t$_"
     }
-    Update-Logs -Message "Authentication successful!" 
-
     Set-Variable -Scope Global -Name "FASession" -Value $authRequest.session
     return $guid
 }
@@ -86,33 +82,28 @@ function Upload-FACertificate {
                     data = @(@{
                 "private-key"=$(gc $keyPath -raw).ToString();
                 name=$CertName;
-                certificate = $(gc $CertificatePath -raw).ToString()
+                certificate = @($(gc $CertificatePath -raw).ToString())
             });
             url='/cli/global/system/certificate/local'
         });
         session = $FASession;
         id = $guid
-    } | ConvertTo-Json -Depth 4
+    } | ConvertTo-Json -Depth 5
 
     try{
-        Update-Logs -Message "Uploading Certificate $($CertName)"
         #splat arguments
         $splat = @{
             Uri = "https://$FortiAnalyzer/jsonrpc";
             SessionVariable = $FASession;
             Method = 'POST';
-            Body = $postParams
-            headers = @{"Content-Type" = "application/json"}
+            Body = $postParams;
+            headers = @{"Content-Type" = "application/json"};
         }
-        #Write-Host @splat
-        $UploadResult = Invoke-RestMethod @splat
-        #Write-Host $UploadResult.result.status
+	if($PSEdition -eq "Core"){$splat.Add("SkipCertificateCheck",$true)}
+        return Invoke-RestMethod @splat
     }catch{
-        Write-Verbose "Failed to upload certificate with error: `n`t$_" | Out-File $LogFile -Append
         throw "Failed to upload certificate with error:`n`t$_"
     }
-    if($PSEdition -eq "Core"){$splat.Add("SkipCertificateCheck",$true)}
-    #return $UploadResult
 }
 
 function Set-FACertificate {
@@ -133,7 +124,6 @@ function Set-FACertificate {
     } | ConvertTo-Json -Depth 4
     
     try{
-        Update-Logs -Message "Set Certificate $($CertName)"
         #splat arguments
         $splat = @{
             Uri = "https://$FortiAnalyzer/jsonrpc";
@@ -143,11 +133,10 @@ function Set-FACertificate {
             headers = @{"Content-Type" = "application/json"}
         }
         
-        #Write-Host @splat
-        $SetCertificateResult = Invoke-RestMethod @splat
+	if($PSEdition -eq "Core"){$splat.Add("SkipCertificateCheck",$true)}
+        return Invoke-RestMethod @splat
         #Write-Host $SetCertificateResult.result.status
     }catch{
-        Write-Verbose "Failed to set certificate with error: `n`t$_" | Out-File $LogFile -Append
         throw "Failed to set certificate with error:`n`t$_"
     }
 }
@@ -167,8 +156,6 @@ function Disconnect-FortiAnalyzer {
         id = $guid
     } | ConvertTo-Json
 
-    Update-Logs -Message "Disconnect - Building Splat" 
-    
     # logout
     $splat = @{
         headers = @{"Content-Type" = "application/json"}
@@ -181,23 +168,12 @@ function Disconnect-FortiAnalyzer {
     $logoutRequest = Invoke-RestMethod @splat
 
     Remove-Variable -Scope Global -Name "FASession" 
-    #return $logoutRequest
+    return $logoutRequest
 }
 
-function Update-Logs {
-    Param (
-        [String]$Message
-    )
-    $Time = Get-Date -Format "HH:mm:ss.f"
-    $Line = "[$($Time)]  $($Message)"
-    $Line | Out-File $LogFile -Append
-    #Write-Output $Message
-}
 
 Import-Module Posh-Acme
-$LogFile = '.\FortiAnalyzer-LERenewal.log'
-Get-Date | Out-File $LogFile -Append
-Write-Output "Starting Certificate Renewal for $($FortiAnalyzer)" | Out-File $LogFile -Append
+Write-Output "Starting Certificate Renewal for $($FortiAnalyzer)"
 
 if($UseExisting){
     $cert = Get-PACertificate -MainDomain $MainDomain
@@ -210,10 +186,10 @@ if($UseExisting){
 }
 
 if($cert){
-    Write-Output "...Renewal Complete!" | Out-File $LogFile -Append
+    Write-Output "...Renewal Complete!"
 
     if($PSCmdlet.ParameterSetName -eq "PlainTextPassword"){
-        Write-Warning "You shouldn't use plaintext passwords on the commandline" | Out-File $LogFile -Append
+        Write-Warning "You shouldn't use plaintext passwords on the commandline"
         #$Credential = New-Credential -Username $env:FGT_USER -Password $env:FGT_PASS
         [securestring]$secStringPassword = ConvertTo-SecureString $Password -AsPlainText -Force
         $Credential = New-Object System.Management.Automation.PSCredential ($Username, $secStringPassword)
